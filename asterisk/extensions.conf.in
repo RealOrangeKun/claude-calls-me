@@ -1,0 +1,19 @@
+[general]
+static=yes
+writeprotect=yes
+
+; You dial anything from Linphone -> Claude answers
+[from-phone]
+exten => _X.,1,Goto(talk,s,1)
+exten => _[a-z].,1,Goto(talk,s,1)
+exten => claude,1,Goto(talk,s,1)
+
+; Outbound: call-me originates PJSIP/phone into here with CALLID set
+[claude-out]
+exten => s,1,Goto(talk,s,1)
+
+[talk]
+exten => s,1,Answer()
+ same => n,Set(CALLID=${IF($["${CALLID}" = ""]?${SHELL(cat /proc/sys/kernel/random/uuid | tr -d '\n')}:${CALLID})})
+ same => n,AudioSocket(${CALLID},{AUDIOSOCKET_HOST}:9092)
+ same => n,Hangup()

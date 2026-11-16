@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Compact status of Claude Code sessions, for the phone Claude (cheap on tokens).
+
+  sessions                 recent interactive sessions: project, age, working/idle, task, last words
+  sessions --all           include headless `claude -p` sessions (phone calls, scripts)
+  sessions show <q>        condensed recent activity of one session; <q> = id prefix or a word
+                           from its project path / prompts (e.g. "api", "dashboard")
+"""
+import json, sys, time
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path.home() / ".claude/projects"
+ACTIVE_S = 120          # written to in the last 2 min -> probably still working
+
+
+def clip(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def user_text(e):
+    c = e.get("message", {}).get("content")
+    if isinstance(c, list):
+        c = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    if not isinstance(c, str) or not c.strip() or c.lstrip().startswith("<"):
+        return None      # tool results, system reminders, command caveats
+    return c
+
+
+def parse(path):
+    s = {"id": path.stem, "path": path, "mtime": path.stat().st_mtime, "cwd": None, "branch": None,
+         "entry": None, "prompts": [], "events": [], "last_type": None, "pending_tool": False}
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            t = e.get("type")
+            if e.get("isSidechain"):
+                continue
+            s["cwd"] = e.get("cwd") or s["cwd"]
+            s["branch"] = e.get("gitBranch") or s["branch"]
+            s["entry"] = s["entry"] or e.get("entrypoint")
+            if t == "user":
+                txt = user_text(e)
+                if txt:
+                    s["prompts"].append(txt)
+                    s["events"].append(("you", txt))
+                s["pending_tool"] = False
+                s["last_type"] = "user"
+            elif t == "assistant":
+                for b in e.get("message", {}).get("content") or []:
+                    if b.get("type") == "text" and b.get("text", "").strip():
+                        s["events"].append(("claude", b["text"]))
+                    elif b.get("type") == "tool_use":
+                        inp = b.get("input") or {}
+                        hint = inp.get("description") or inp.get("command") or inp.get("file_path") or inp.get("pattern") or ""
+                        s["events"].append(("tool", f"{b.get('name')}: {hint}"))
+                        s["pending_tool"] = True
+                s["last_type"] = "assistant"
+    return s
+
+
+def status(s):
+    age = time.time() - s["mtime"]
+    working = age < ACTIVE_S or (age < 1800 and (s["pending_tool"] or s["last_type"] == "user"))
+    return ("WORKING" if working else "idle"), age
+
+
+def ago(sec):
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if sec >= n:
+            return f"{int(sec // n)}{unit} ago"
+    return "just now"
+
+
+def all_sessions(include_headless, me):
+    files = sorted(ROOT.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:40]
+    out = []
+    for f in files:
+        if f.stem == me:
+            continue
+        s = parse(f)
+        if not s["prompts"]:
+            continue
+        if not include_headless and s["entry"] == "sdk-cli":
+            continue
+        out.append(s)
+    return out
+
+
+def main():
+    import os
+    args = sys.argv[1:]
+    me = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if "--help" in args or "-h" in args:
+        sys.exit(__doc__)
+    sess = all_sessions("--all" in args or "show" in args, me)
+    if args[:1] == ["show"]:
+        q = " ".join(args[1:]).lower()
+        if not q:
+            sys.exit("usage: sessions show <id prefix | word>")
+        tiers = [lambda s: s["id"].startswith(q),
+                 lambda s: q in Path(s["cwd"] or "").name.lower() and s["entry"] != "sdk-cli",
+                 lambda s: q in (s["cwd"] or "").lower() and s["entry"] != "sdk-cli",
+                 lambda s: any(q in p.lower() for p in s["prompts"]) and s["entry"] != "sdk-cli",
+                 lambda s: q in (s["cwd"] or "").lower() or any(q in p.lower() for p in s["prompts"])]
+        hit = next((s for f in tiers for s in sess if f(s)), None)
+        if not hit:
+            sys.exit(f"no session matching {q!r}")
+        st, age = status(hit)
+        print(f"session {hit['id']}  [{st}, last activity {ago(age)}]")
+        print(f"project: {hit['cwd']}" + (f"  branch: {hit['branch']}" if hit["branch"] else ""))
+        print(f"first task: {clip(hit['prompts'][0], 300)}")
+        if len(hit["prompts"]) > 1:
+            print(f"latest prompt: {clip(hit['prompts'][-1], 300)}")
+        print("recent activity:")
+        for who, txt in hit["events"][-14:]:
+            print(f"  {who}: {clip(txt, 110 if who == 'tool' else 350)}")
+        return
+    for s in sess[:8]:
+        st, age = status(s)
+        last = next((t for w, t in reversed(s["events"]) if w == "claude"), "")
+        print(f"[{s['id'][:8]}] {Path(s['cwd'] or '?').name} · {ago(age)} · {st}\n"
+              f"    task: {clip(s['prompts'][-1], 120)}\n    last: {clip(last, 160)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Render asterisk/*.conf.in into asterisk/generated/ using the values in .env.
+
+Two network modes (CALLME_DOCKER_NET in .env, default: host on Linux, bridge on macOS):
+  host    Asterisk shares the host network and binds SIP straight to the Tailscale IP.
+  bridge  Asterisk sits behind Docker's NAT (the only option on Docker Desktop for Mac):
+          ports are published on the Tailscale IP and SIP/RTP addresses are rewritten to it.
+"""
+import platform, shutil, sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SRC, OUT = ROOT / "asterisk", ROOT / "asterisk" / "generated"
+
+
+def load_env():
+    env = {}
+    for line in (ROOT / ".env").read_text().splitlines():
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def main():
+    env = load_env()
+    missing = [k for k in ("SIP_USER", "SIP_PASSWORD", "AMI_USER", "AMI_PASSWORD", "TAILSCALE_IP")
+               if not env.get(k)]
+    if missing:
+        sys.exit(f"render-config: missing in .env: {', '.join(missing)}")
+    mode = env.get("CALLME_DOCKER_NET") or ("bridge" if platform.system() == "Darwin" else "host")
+    ip = env["TAILSCALE_IP"]
+    if mode == "host":
+        v = {"SIP_BIND": ip, "NAT_LINES": "", "AMI_BIND": "127.0.0.1", "AUDIOSOCKET_HOST": "127.0.0.1"}
+    elif mode == "bridge":
+        v = {"SIP_BIND": "0.0.0.0", "AMI_BIND": "0.0.0.0", "AUDIOSOCKET_HOST": "host.docker.internal",
+             "NAT_LINES": f"external_media_address={ip}\nexternal_signaling_address={ip}\n"
+                          "local_net=172.16.0.0/12\nlocal_net=10.0.0.0/8\n"}
+    else:
+        sys.exit(f"render-config: CALLME_DOCKER_NET must be host or bridge, not {mode!r}")
+    v.update({k: env[k] for k in ("SIP_USER", "SIP_PASSWORD", "AMI_USER", "AMI_PASSWORD")})
+
+    OUT.mkdir(exist_ok=True)
+    for f in SRC.glob("*.conf"):
+        shutil.copyfile(f, OUT / f.name)
+    for f in SRC.glob("*.conf.in"):
+        s = f.read_text()
+        for k, val in v.items():          # only known {KEY}s: the dialplan's own ${...} stays intact
+            s = s.replace("{" + k + "}", val)
+        (OUT / f.name[:-3]).write_text(s)
+    (OUT / "mode").write_text(mode + "\n")
+    print(f"render-config: wrote {OUT.relative_to(ROOT)}/ ({mode} mode, SIP on {ip}:5060)")
+
+
+if __name__ == "__main__":
+    main()

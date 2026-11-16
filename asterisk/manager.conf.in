@@ -1,0 +1,9 @@
+[general]
+enabled=yes
+bindaddr={AMI_BIND}
+port=5038
+
+[{AMI_USER}]
+secret={AMI_PASSWORD}
+read=call,system
+write=originate,call,system

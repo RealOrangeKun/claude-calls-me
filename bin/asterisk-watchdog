@@ -1,0 +1,25 @@
+#!/bin/sh
+# Keeps claude-asterisk usable when Docker starts before Tailscale (run every minute by
+# systemd/launchd; see install.sh):
+#   - container exited because its start failed (bridge mode: Tailscale IP missing) -> start it
+#   - host mode: running but SIP never bound to the Tailscale IP                     -> restart it
+# A container you stopped yourself (no start error) is left alone.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+IP=$(sed -n 's/^TAILSCALE_IP=//p' "$ROOT/.env")
+MODE=$(cat "$ROOT/asterisk/generated/mode" 2>/dev/null)
+
+if command -v ip >/dev/null 2>&1; then ip -4 addr show | grep -q "inet $IP/" || exit 0
+else ifconfig 2>/dev/null | grep -q "inet $IP " || exit 0; fi          # Tailscale not up yet
+
+STATE=$(docker inspect -f '{{.State.Running}}|{{.State.Error}}' claude-asterisk 2>/dev/null) || exit 0
+case "$STATE" in
+  false\|?*) echo "claude-asterisk failed to start (${STATE#*|}), starting it"
+             exec docker start claude-asterisk ;;
+  false\|)   exit 0 ;;                                                   # stopped on purpose
+esac
+
+if [ "$MODE" = host ]; then
+  ss -lun 2>/dev/null | grep -q "$IP:5060" && exit 0
+  echo "SIP not bound on $IP:5060, restarting claude-asterisk"
+  exec docker restart claude-asterisk
+fi

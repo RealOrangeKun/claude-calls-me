@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""call-me "message" [--no-wait | --wait-answer | --wait-end] [--no-session]
+
+Rings your phone; Claude says the message, then you can talk.
+
+Run from inside Claude Code (CLAUDE_CODE_SESSION_ID is set), the call continues that chat: the phone
+Claude forks the session so it knows what you were doing, and call-me blocks until you hang up, then
+prints the transcript so the chat knows what was said. Run it with run_in_background so the session is
+notified when the call ends.
+
+Elsewhere (hooks, cron, shell) it defaults to --wait-answer: prints "answered" / "no answer".
+"""
+import json, os, sys, urllib.request
+flags = {a for a in sys.argv[1:] if a.startswith("--")}
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+if not args or "--help" in flags:
+    sys.exit(__doc__)
+session = None if "--no-session" in flags else os.environ.get("CLAUDE_CODE_SESSION_ID")
+wait = ("end" if "--wait-end" in flags else "answer" if "--wait-answer" in flags
+        else False if "--no-wait" in flags else "end" if session else "answer")
+body = json.dumps({"message": " ".join(args), "wait": wait, "session": session}).encode()
+try:
+    r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:9093/call", body,
+                               {"Content-Type": "application/json"}),
+                               timeout=None if wait == "end" else 70)
+except OSError as e:
+    sys.exit(f"call-me: voice daemon not reachable ({e}). Is it running? See the README (Run / Troubleshooting)")
+res = json.loads(r.read())
+print(res.get("status") or res.get("error"), f"({res['reason']})" if res.get("reason") and not res.get("ok") else "")
+if res.get("transcript") is not None:
+    print("\n--- phone call transcript ---")
+    print("\n".join(res["transcript"]) or "(nothing said)")
+    if res.get("phone_session"):
+        print(f"--- work done on the call is in session {res['phone_session']} "
+              f"(claude --resume {res['phone_session']}) ---")
+sys.exit(0 if res.get("ok") else 1)

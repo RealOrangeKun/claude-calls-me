@@ -1,0 +1,13 @@
+# secrets and per-machine state
+.env
+asterisk/generated/
+logs/
+# fetched/built by install.sh
+.venv/
+models/
+whisper.cpp/
+# misc
+__pycache__/
+tests/reply.wav
+.bak-portable/
+samples/
